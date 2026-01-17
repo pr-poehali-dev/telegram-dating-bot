@@ -77,19 +77,26 @@ def handle_message(message: dict, bot_token: str, cursor, schema: str) -> dict:
     text = message.get('text', '')
     user = message['from']
     
+    admin_id = os.environ.get('ADMIN_TELEGRAM_ID', '')
+    is_admin = str(chat_id) == admin_id
+    
     if text == '/start':
-        return send_message(
-            bot_token, 
-            chat_id,
-            "💜 Добро пожаловать в бот знакомств для подростков!\n\n"
-            "Здесь ты можешь найти новых друзей.\n\n"
-            "Используй команды:\n"
-            "/create - Создать анкету\n"
-            "/browse - Смотреть анкеты\n"
-            "/matches - Взаимные лайки\n"
-            "/profile - Моя анкета\n"
-            "/help - Помощь"
-        )
+        msg = "💜 Добро пожаловать в бот знакомств для подростков!\n\n"
+        msg += "Здесь ты можешь найти новых друзей.\n\n"
+        msg += "Используй команды:\n"
+        msg += "/create - Создать анкету\n"
+        msg += "/browse - Смотреть анкеты\n"
+        msg += "/matches - Взаимные лайки\n"
+        msg += "/profile - Моя анкета\n"
+        msg += "/help - Помощь\n"
+        
+        if is_admin:
+            msg += "\n🛡️ Команды модератора:\n"
+            msg += "/moderate - Проверить анкеты\n"
+            msg += "/reports - Просмотреть жалобы\n"
+            msg += "/stats - Статистика бота"
+        
+        return send_message(bot_token, chat_id, msg)
     
     if text == '/create':
         profile = get_profile(cursor, chat_id)
@@ -170,6 +177,21 @@ def handle_message(message: dict, bot_token: str, cursor, schema: str) -> dict:
         
         return send_message(bot_token, chat_id, text)
     
+    if text == '/moderate':
+        if not is_admin:
+            return send_message(bot_token, chat_id, "У вас нет доступа к этой команде")
+        return show_pending_profiles(bot_token, chat_id, cursor)
+    
+    if text == '/reports':
+        if not is_admin:
+            return send_message(bot_token, chat_id, "У вас нет доступа к этой команде")
+        return show_reports(bot_token, chat_id, cursor)
+    
+    if text == '/stats':
+        if not is_admin:
+            return send_message(bot_token, chat_id, "У вас нет доступа к этой команде")
+        return show_stats(bot_token, chat_id, cursor)
+    
     if text == '/help':
         return send_message(
             bot_token,
@@ -213,6 +235,22 @@ def handle_callback(callback: dict, bot_token: str, cursor, schema: str) -> dict
     if data.startswith('report_'):
         target_id = int(data.split('_')[1])
         return handle_report(bot_token, chat_id, target_id, cursor, message_id)
+    
+    if data.startswith('mod_approve_'):
+        profile_id = int(data.split('_')[2])
+        return mod_approve_profile(bot_token, chat_id, profile_id, cursor, message_id)
+    
+    if data.startswith('mod_reject_'):
+        profile_id = int(data.split('_')[2])
+        return mod_reject_profile(bot_token, chat_id, profile_id, cursor, message_id)
+    
+    if data.startswith('rep_resolve_'):
+        report_id = int(data.split('_')[2])
+        return mod_resolve_report(bot_token, chat_id, report_id, cursor, message_id)
+    
+    if data.startswith('rep_dismiss_'):
+        report_id = int(data.split('_')[2])
+        return mod_dismiss_report(bot_token, chat_id, report_id, cursor, message_id)
     
     return {'ok': True}
 
@@ -434,6 +472,184 @@ def answer_callback(bot_token: str, callback_id: int, text: str):
         f"https://api.telegram.org/bot{bot_token}/answerCallbackQuery",
         json={'callback_query_id': callback_id, 'text': text}
     )
+
+
+def show_pending_profiles(bot_token: str, chat_id: int, cursor) -> dict:
+    """Показать анкеты на модерации"""
+    cursor.execute(
+        "SELECT id, telegram_id, name, age, city, gender, bio FROM profiles WHERE status = 'pending' ORDER BY created_at LIMIT 1"
+    )
+    
+    profile = cursor.fetchone()
+    if not profile:
+        return send_message(bot_token, chat_id, "✅ Нет анкет на модерации")
+    
+    gender_text = 'Парень' if profile[5] == 'male' else 'Девушка'
+    text = (
+        f"🔍 Анкета на проверку:\n\n"
+        f"👤 {profile[2]}, {profile[3]}\n"
+        f"📍 {profile[4]}\n"
+        f"👥 {gender_text}\n"
+    )
+    
+    if profile[6]:
+        text += f"💬 {profile[6]}\n"
+    
+    text += f"\n🆔 Telegram ID: {profile[1]}"
+    
+    keyboard = {
+        'inline_keyboard': [
+            [
+                {'text': '❌ Отклонить', 'callback_data': f'mod_reject_{profile[0]}'},
+                {'text': '✅ Одобрить', 'callback_data': f'mod_approve_{profile[0]}'}
+            ]
+        ]
+    }
+    
+    import requests
+    requests.post(
+        f"https://api.telegram.org/bot{bot_token}/sendMessage",
+        json={'chat_id': chat_id, 'text': text, 'reply_markup': keyboard}
+    )
+    
+    return {'ok': True}
+
+
+def show_reports(bot_token: str, chat_id: int, cursor) -> dict:
+    """Показать жалобы"""
+    cursor.execute(
+        """SELECT r.id, r.reporter_id, r.reported_user_id, r.reason,
+                  p1.name as reporter_name, p2.name as reported_name
+           FROM reports r
+           JOIN profiles p1 ON r.reporter_id = p1.telegram_id
+           JOIN profiles p2 ON r.reported_user_id = p2.telegram_id
+           WHERE r.status = 'pending'
+           ORDER BY r.created_at
+           LIMIT 1"""
+    )
+    
+    report = cursor.fetchone()
+    if not report:
+        return send_message(bot_token, chat_id, "✅ Нет активных жалоб")
+    
+    text = (
+        f"🚩 Жалоба #{report[0]}:\n\n"
+        f"От: {report[4]} (ID: {report[1]})\n"
+        f"На: {report[5]} (ID: {report[2]})\n"
+    )
+    
+    if report[3]:
+        text += f"\nПричина: {report[3]}"
+    
+    keyboard = {
+        'inline_keyboard': [
+            [
+                {'text': '❌ Отклонить', 'callback_data': f'rep_dismiss_{report[0]}'},
+                {'text': '✅ Принять меры', 'callback_data': f'rep_resolve_{report[0]}'}
+            ]
+        ]
+    }
+    
+    import requests
+    requests.post(
+        f"https://api.telegram.org/bot{bot_token}/sendMessage",
+        json={'chat_id': chat_id, 'text': text, 'reply_markup': keyboard}
+    )
+    
+    return {'ok': True}
+
+
+def show_stats(bot_token: str, chat_id: int, cursor) -> dict:
+    """Показать статистику"""
+    cursor.execute("SELECT COUNT(*) FROM profiles WHERE status = 'approved'")
+    approved = cursor.fetchone()[0]
+    
+    cursor.execute("SELECT COUNT(*) FROM profiles WHERE status = 'pending'")
+    pending = cursor.fetchone()[0]
+    
+    cursor.execute("SELECT COUNT(*) FROM matches")
+    matches = cursor.fetchone()[0]
+    
+    cursor.execute("SELECT COUNT(*) FROM reports WHERE status = 'pending'")
+    reports = cursor.fetchone()[0]
+    
+    cursor.execute("SELECT COUNT(*) FROM likes WHERE created_at > NOW() - INTERVAL '24 hours'")
+    likes_today = cursor.fetchone()[0]
+    
+    text = (
+        f"📊 Статистика бота:\n\n"
+        f"✅ Одобренных анкет: {approved}\n"
+        f"⏳ На модерации: {pending}\n"
+        f"💜 Совпадений: {matches}\n"
+        f"🚩 Активных жалоб: {reports}\n"
+        f"❤️ Лайков за 24ч: {likes_today}"
+    )
+    
+    return send_message(bot_token, chat_id, text)
+
+
+def mod_approve_profile(bot_token: str, chat_id: int, profile_id: int, cursor, message_id: int) -> dict:
+    """Модератор одобряет анкету"""
+    cursor.execute(
+        "UPDATE profiles SET status = 'approved', updated_at = NOW() WHERE id = %s RETURNING telegram_id, name",
+        (profile_id,)
+    )
+    
+    result = cursor.fetchone()
+    if result:
+        user_id, name = result
+        send_message(bot_token, user_id, f"✅ Твоя анкета одобрена!\n\nТеперь ты можешь смотреть анкеты командой /browse")
+        delete_message(bot_token, chat_id, message_id)
+        send_message(bot_token, chat_id, f"✅ Анкета {name} одобрена")
+        show_pending_profiles(bot_token, chat_id, cursor)
+    
+    return {'ok': True}
+
+
+def mod_reject_profile(bot_token: str, chat_id: int, profile_id: int, cursor, message_id: int) -> dict:
+    """Модератор отклоняет анкету"""
+    cursor.execute(
+        "UPDATE profiles SET status = 'rejected', updated_at = NOW() WHERE id = %s RETURNING telegram_id, name",
+        (profile_id,)
+    )
+    
+    result = cursor.fetchone()
+    if result:
+        user_id, name = result
+        send_message(bot_token, user_id, f"❌ Твоя анкета отклонена.\n\nВозможные причины:\n- Неподходящее фото\n- Некорректные данные\n\nСоздай новую анкету командой /create")
+        delete_message(bot_token, chat_id, message_id)
+        send_message(bot_token, chat_id, f"❌ Анкета {name} отклонена")
+        show_pending_profiles(bot_token, chat_id, cursor)
+    
+    return {'ok': True}
+
+
+def mod_resolve_report(bot_token: str, chat_id: int, report_id: int, cursor, message_id: int) -> dict:
+    """Модератор принимает меры по жалобе"""
+    cursor.execute(
+        "UPDATE reports SET status = 'resolved' WHERE id = %s",
+        (report_id,)
+    )
+    
+    delete_message(bot_token, chat_id, message_id)
+    send_message(bot_token, chat_id, f"✅ Жалоба #{report_id} обработана")
+    show_reports(bot_token, chat_id, cursor)
+    
+    return {'ok': True}
+
+
+def mod_dismiss_report(bot_token: str, chat_id: int, report_id: int, cursor, message_id: int) -> dict:
+    """Модератор отклоняет жалобу"""
+    cursor.execute(
+        "UPDATE reports SET status = 'dismissed' WHERE id = %s",
+        (report_id,)
+    )
+    
+    delete_message(bot_token, chat_id, message_id)
+    send_message(bot_token, chat_id, f"❌ Жалоба #{report_id} отклонена")
+    show_reports(bot_token, chat_id, cursor)
+    
+    return {'ok': True}
 
 
 def error_response(message: str) -> dict:
