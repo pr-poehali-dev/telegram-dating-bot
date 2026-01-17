@@ -1,0 +1,21 @@
+{
+  "tests": [
+    {
+      "name": "Health check",
+      "method": "POST",
+      "path": "/",
+      "body": {
+        "message": {
+          "chat": {"id": 123456789},
+          "from": {"id": 123456789, "username": "testuser"},
+          "text": "/start"
+        }
+      },
+      "expectedStatus": 200,
+      "expectedBody": {
+        "ok": true
+      },
+      "bodyMatcher": "partial"
+    }
+  ]
+}
