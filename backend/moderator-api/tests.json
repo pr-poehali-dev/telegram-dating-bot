@@ -1,0 +1,14 @@
+{
+  "tests": [
+    {
+      "name": "Get stats",
+      "method": "GET",
+      "path": "/?action=stats",
+      "expectedStatus": 200,
+      "expectedBody": {
+        "total_profiles": 0
+      },
+      "bodyMatcher": "partial"
+    }
+  ]
+}
